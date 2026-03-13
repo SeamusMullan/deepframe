@@ -1,6 +1,11 @@
-"""Configuration management for DeepFrame."""
+"""Configuration management for DeepFrame.
+
+Provides XML (de)serialization for preset handling with versioning.
+"""
 
 import json
+import xml.etree.ElementTree as ET
+import xml.dom.minidom as minidom
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -73,6 +78,9 @@ class AppSettings:
     last_output_dir: str = ""
     dark_theme: bool = True
     preview_mode: str = "sbs"  # original, depth, sbs, anaglyph
+
+
+CURRENT_PRESET_VERSION = "1.0"
 
 
 @dataclass
@@ -179,3 +187,115 @@ class Config:
             "output": asdict(self.output),
             "app": asdict(self.app),
         }
+
+    # ---------------------------------------------------------------------
+    # XML preset persistence (versioned)
+    # ---------------------------------------------------------------------
+    @staticmethod
+    def _bool_to_str(v: bool) -> str:
+        return "true" if v else "false"
+
+    @staticmethod
+    def _str_to_bool(s: str) -> bool:
+        return s.lower() in ("true", "1", "yes")
+
+    def to_xml(self) -> str:
+        """Serialize the current configuration to a versioned XML string.
+
+        Returns:
+            str: Pretty‑printed XML document.
+        """
+        root = ET.Element("Preset", {"version": CURRENT_PRESET_VERSION})
+
+        # Depth block
+        depth_el = ET.SubElement(root, "Depth")
+        ET.SubElement(depth_el, "Model").text = self.depth.model.value
+        ET.SubElement(depth_el, "Strength").text = str(self.depth.depth_strength)
+        ET.SubElement(depth_el, "EyeSeparation").text = str(self.depth.eye_separation)
+        ET.SubElement(depth_el, "Focus").text = str(self.depth.depth_focus)
+        ET.SubElement(depth_el, "FillMode").text = self.depth.fill_mode.value
+        ET.SubElement(depth_el, "Layout").text = self.depth.output_layout.value
+
+        # Output block
+        out_el = ET.SubElement(root, "Output")
+        ET.SubElement(out_el, "Codec").text = self.output.codec.value
+        ET.SubElement(out_el, "Quality").text = str(self.output.quality)
+        ET.SubElement(out_el, "PreserveResolution").text = self._bool_to_str(
+            self.output.preserve_resolution
+        )
+        ET.SubElement(out_el, "CustomWidth").text = (
+            "" if self.output.custom_width is None else str(self.output.custom_width)
+        )
+        ET.SubElement(out_el, "CustomHeight").text = (
+            "" if self.output.custom_height is None else str(self.output.custom_height)
+        )
+
+        # App block
+        app_el = ET.SubElement(root, "App")
+        ET.SubElement(app_el, "DevicePreference").text = self.app.device_preference
+        ET.SubElement(app_el, "DarkTheme").text = self._bool_to_str(self.app.dark_theme)
+        ET.SubElement(app_el, "PreviewMode").text = self.app.preview_mode
+
+        # Pretty‑print using minidom
+        rough = ET.tostring(root, "utf-8")
+        reparsed = minidom.parseString(rough)
+        return reparsed.toprettyxml(indent="  ")
+
+    @classmethod
+    def from_xml(cls, xml_str: str) -> "Config":
+        """Parse a preset XML string and return a Config instance.
+
+        Raises:
+            ValueError: If the preset version does not match ``CURRENT_PRESET_VERSION``.
+        """
+        root = ET.fromstring(xml_str)
+        file_version = root.attrib.get("version", "0.0")
+        if file_version != CURRENT_PRESET_VERSION:
+            raise ValueError(
+                f"Preset version {file_version} does not match supported version {CURRENT_PRESET_VERSION}"
+            )
+
+        # Helper for optional int conversion
+        def _opt_int(text: str | None) -> int | None:
+            if text is None or text.strip() == "":
+                return None
+            return int(text)
+
+        # Depth
+        depth_el = root.find("Depth")
+        if depth_el is None:
+            raise ValueError("Missing <Depth> element in preset XML")
+        depth = DepthSettings(
+            model=DepthModel(depth_el.findtext("Model", "midas_small")),
+            depth_strength=float(depth_el.findtext("Strength", "0.5")),
+            eye_separation=int(depth_el.findtext("EyeSeparation", "63")),
+            depth_focus=float(depth_el.findtext("Focus", "0.5")),
+            fill_mode=FillMode(depth_el.findtext("FillMode", "inpaint")),
+            output_layout=SBSLayout(depth_el.findtext("Layout", "half")),
+        )
+
+        # Output
+        out_el = root.find("Output")
+        if out_el is None:
+            raise ValueError("Missing <Output> element in preset XML")
+        output = OutputSettings(
+            codec=VideoCodec(out_el.findtext("Codec", "libx264")),
+            quality=int(out_el.findtext("Quality", "23")),
+            preserve_resolution=cls()._str_to_bool(out_el.findtext("PreserveResolution", "true")),
+            custom_width=_opt_int(out_el.findtext("CustomWidth")),
+            custom_height=_opt_int(out_el.findtext("CustomHeight")),
+        )
+
+        # App
+        app_el = root.find("App")
+        app = AppSettings(
+            device_preference=app_el.findtext("DevicePreference", "auto"),
+            last_input_dir=app_el.findtext("LastInputDir", ""),
+            last_output_dir=app_el.findtext("LastOutputDir", ""),
+            dark_theme=cls()._str_to_bool(app_el.findtext("DarkTheme", "true")),
+            preview_mode=app_el.findtext("PreviewMode", "sbs"),
+        )
+
+        cfg = cls(depth=depth, output=output, app=app)
+        cfg._config_path = None
+        return cfg

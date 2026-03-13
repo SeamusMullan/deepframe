@@ -138,6 +138,11 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        open_preset_action = QAction("&Open Preset...", self)
+        open_preset_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        open_preset_action.triggered.connect(self._open_preset)
+        file_menu.addAction(open_preset_action)
+
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
@@ -317,7 +322,7 @@ class MainWindow(QMainWindow):
         self.video_player.set_preview_mode(mode)
 
     def _set_device(self, device: str) -> None:
-        """Set the processing device."""
+        """Set the processing device and refresh UI."""
         # Update checkmarks
         for d, action in self._device_actions.items():
             action.setChecked(d == device)
@@ -327,6 +332,68 @@ class MainWindow(QMainWindow):
 
         # Unload current model to force reload on new device
         self._processor.unload_model()
+
+    def _apply_config_to_ui(self) -> None:
+        """Synchronise the UI widgets with the values stored in ``self.config``.
+
+        This is used after loading a preset so that menus, panels and the video
+        preview all reflect the new configuration.
+        """
+        # Settings panel (depth & output controls)
+        self.settings_panel.load_from_config(self.config)
+
+        # Preview mode actions (menu radio‑buttons)
+        for mode, action in self._preview_actions.items():
+            action.setChecked(mode == self.config.app.preview_mode)
+
+        # Device actions (menu radio‑buttons)
+        for dev, action in self._device_actions.items():
+            action.setChecked(dev == self.config.app.device_preference)
+
+        # Dark‑theme handling – simple example (replace with your real stylesheet logic)
+        if self.config.app.dark_theme:
+            # Assuming a dark stylesheet exists at src/ui/styles.qss
+            style_path = Path(__file__).parent / "ui" / "styles.qss"
+            if style_path.exists():
+                self.setStyleSheet(style_path.read_text())
+        else:
+            self.setStyleSheet("")
+
+        # Update video player preview mode
+        self.video_player.set_preview_mode(self.config.app.preview_mode)
+
+        # Force a preview refresh so the new settings are visible immediately
+        self.video_player.refresh_preview()
+
+    def _open_preset(self) -> None:
+        """Prompt the user for a preset file, load it, and apply its values.
+
+        The preset is stored as XML (see ``Config.to_xml``). Errors are shown in a
+        message box and do not crash the application.
+        """
+        preset_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Preset",
+            str(Path.home()),
+            "XML Files (*.xml);;All Files (*)",
+        )
+        if not preset_path:
+            return
+        try:
+            xml_content = Path(preset_path).read_text(encoding="utf-8")
+            new_cfg = Config.from_xml(xml_content)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Failed to Load Preset",
+                f"Could not read preset file:\n{exc}",
+            )
+            return
+
+        # Replace the current configuration and push changes to UI
+        self.config = new_cfg
+        self._apply_config_to_ui()
+        self.status_label.setText(f"Preset loaded: {Path(preset_path).name}")
 
     def _export_selected(self) -> None:
         """Export selected queue items."""
@@ -353,9 +420,7 @@ class MainWindow(QMainWindow):
         # Get output directory
         start_dir = self.config.app.last_output_dir or str(Path.home())
 
-        output_dir = QFileDialog.getExistingDirectory(
-            self, "Select Output Directory", start_dir
-        )
+        output_dir = QFileDialog.getExistingDirectory(self, "Select Output Directory", start_dir)
 
         if not output_dir:
             return
@@ -367,11 +432,13 @@ class MainWindow(QMainWindow):
         for input_path in paths:
             input_name = Path(input_path).stem
             output_path = str(Path(output_dir) / f"{input_name}_SBS.mp4")
-            jobs.append(ExportJob(
-                input_path=input_path,
-                output_path=output_path,
-                config=self.config,
-            ))
+            jobs.append(
+                ExportJob(
+                    input_path=input_path,
+                    output_path=output_path,
+                    config=self.config,
+                )
+            )
 
         # Create and start export worker
         self._export_worker = ExportWorker(self._processor, jobs, self)

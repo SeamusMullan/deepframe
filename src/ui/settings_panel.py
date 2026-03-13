@@ -199,6 +199,12 @@ class SettingsPanel(QWidget):
 
         layout.addStretch()
 
+    def load_from_config(self) -> None:
+        """Public wrapper to load settings from the attached Config.
+        This method is called by MainWindow when applying a preset.
+        """
+        self._load_from_config()
+
     def _load_from_config(self) -> None:
         """Load settings from config."""
         # Depth settings
